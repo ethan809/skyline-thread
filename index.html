@@ -209,13 +209,111 @@ function actor(mesh){
   if(anchor&&s===1)beam(mesh,hand,anchor,.037,[.88,.79,.69,3]);
  }
 }
+function updateScene(now,last){
+  const dt=Math.min(.055,(now-last)/1000);
+  if(playing){const steps=Math.max(1,Math.ceil(dt/.012));for(let i=0;i<steps&&playing;i++)step(dt/steps);}
+  const resolution=Math.min(1,1400/innerWidth);
+  const width=Math.max(1,Math.round(innerWidth*resolution)),height=Math.max(1,Math.round(innerHeight*resolution));
+  const dir=[Math.sin(yaw),0,-Math.cos(yaw)];
+  const eye=add(sub(player,scale(dir,8.8)),[0,3.3,0]);
+  const forward=unit(add(dir,[0,-.15,0])),right=unit(cross(forward,[0,1,0])),up=cross(right,forward);
+  const mesh=[];
+  actor(mesh);
+  if(signal<targets.length){
+   const target=targets[signal], spin=now*.001;
+   for(let i=0;i<18;i++){
+    const theta=i*Math.PI/9, next=(i+1)*Math.PI/9;
+    const point=angle=>add(target,[Math.cos(angle)*7,Math.sin(angle)*7,Math.sin(spin)*.55*Math.cos(angle)]);
+    beam(mesh,point(theta),point(next),.23,[.96,.54,.22,3]);
+   }
+   if(playing) hud.textContent=`SIGNALS ${signal}/6  ·  ${timer.toFixed(1)}s  ·  ${Math.round(length(velocity)*3.6)} km/h  ·  TARGET ${Math.round(length(sub(player,target)))} m${anchor?'  ·  ATTACHED':''}`;
+  }
+  return {width,height,eye,right,up,front:forward,mesh};
+}
+function bootFallback(){
+ const gl=canvas.getContext('webgl2');
+ if(!gl)throw Error('This device could not start WebGPU or WebGL 2.');
+ const vertex=`#version 300 es
+ layout(location=0) in vec3 position;
+ layout(location=1) in vec3 normal;
+ layout(location=2) in vec4 material;
+ uniform vec3 eye, right, up, front;
+ uniform float aspect;
+ out vec3 p,n;
+ out vec4 m;
+ void main(){
+  vec3 d=position-eye;
+  float z=dot(d,front);
+  gl_Position=vec4(dot(d,right)*1.65/aspect,dot(d,up)*1.65,z-.24,z);
+  p=position;n=normal;m=material;
+ }`;
+ const fragment=`#version 300 es
+ precision highp float;
+ in vec3 p,n;
+ in vec4 m;
+ uniform vec3 eye;
+ out vec4 color;
+ void main(){
+  vec3 base=m.rgb;
+  vec3 ray=normalize(p-eye);
+  vec3 haze=mix(vec3(.18,.25,.42),vec3(.68,.45,.38),exp(-abs(ray.y)*5.));
+  if(m.w==1.&&abs(n.y)<.5){
+   vec2 grid=vec2(abs(n.x)>.5?p.z:p.x,p.y)/vec2(2.4,3.6);
+   vec2 w=fract(grid);
+   if(w.x>.13&&w.x<.87&&w.y>.18&&w.y<.88){
+    float lit=fract(sin(dot(floor(grid),vec2(127.1,311.7)))*43758.54);
+    base=lit>.67?vec3(.72,.40,.17):base*.35+haze*.26;
+   }
+  }
+  if(m.w==2.)base+=haze*.18*pow(1.-abs(ray.y),3.);
+  float light=.48+.82*max(0.,dot(n,normalize(vec3(-.34,.36,-1.))));
+  if(m.w==3.)light=1.9;
+  color=vec4(mix(base*light,haze,(1.-exp(-length(p-eye)*.0022))*.8),1.);
+ }`;
+ const program=gl.createProgram();
+ for(const [type,code] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]){
+  const sh=gl.createShader(type);gl.shaderSource(sh,code);gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(sh));
+  gl.attachShader(program,sh);gl.deleteShader(sh);
+ }
+ gl.linkProgram(program);
+ if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+ gl.useProgram(program);gl.enable(gl.DEPTH_TEST);
+ function makeBuffer(data,usage){
+  const vao=gl.createVertexArray(), buffer=gl.createBuffer();
+  gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,data,usage);
+  for(const [loc,size,offset] of [[0,3,0],[1,3,12],[2,4,24]]){
+   gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,size,gl.FLOAT,false,40,offset);
+  }
+  return {vao,buffer};
+ }
+ const staticMesh=makeBuffer(new Float32Array(city),gl.STATIC_DRAW);
+ const movingMesh=makeBuffer(65536,gl.DYNAMIC_DRAW);
+ const uniforms=Object.fromEntries(['eye','right','up','front','aspect'].map(name=>[name,gl.getUniformLocation(program,name)]));
+ let last=performance.now();
+ function frame(now){
+  const scene=updateScene(now,last);last=now;
+  if(canvas.width!==scene.width||canvas.height!==scene.height){canvas.width=scene.width;canvas.height=scene.height;}
+  gl.viewport(0,0,scene.width,scene.height);
+  gl.clearColor(.4,.32,.39,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  for(const name of ['eye','right','up','front'])gl.uniform3fv(uniforms[name],scene[name]);
+  gl.uniform1f(uniforms.aspect,scene.width/scene.height);
+  gl.bindVertexArray(staticMesh.vao);gl.drawArrays(gl.TRIANGLES,0,city.length/10);
+  gl.bindVertexArray(movingMesh.vao);gl.bindBuffer(gl.ARRAY_BUFFER,movingMesh.buffer);
+  gl.bufferSubData(gl.ARRAY_BUFFER,0,new Float32Array(scene.mesh));gl.drawArrays(gl.TRIANGLES,0,scene.mesh.length/10);
+  requestAnimationFrame(frame);
+ }
+ requestAnimationFrame(frame);
+ status.textContent='Compatibility mode · WASD to steer · Hold Space or click to swing';
+ start.disabled=false;
+}
 async function boot(){
  if(!navigator.gpu)throw Error('WebGPU is unavailable. Open this in a browser with WebGPU enabled.');
  const adapter=await navigator.gpu.requestAdapter();
  if(!adapter)throw Error('This browser could not find a WebGPU graphics adapter.');
- const device=await adapter.requestDevice(), ctx=canvas.getContext('webgpu');
+ const device=await adapter.requestDevice();
  const format=navigator.gpu.getPreferredCanvasFormat();
- ctx.configure({device,format,alphaMode:'opaque'});
+
  const module=device.createShaderModule({code:shader});
  const errors=(await module.getCompilationInfo()).messages.filter(msg=>msg.type==='error');
  if(errors.length)throw Error(errors.map(msg=>msg.message).join(' | '));
@@ -232,6 +330,8 @@ async function boot(){
   depthStencil:{format:'depth24plus',depthWriteEnabled:false,depthCompare:'always'}
  });
  function buffer(size,usage){return device.createBuffer({size,usage:usage|GPUBufferUsage.COPY_DST});}
+ const ctx=canvas.getContext('webgpu');
+ ctx.configure({device,format,alphaMode:'opaque'});
  const cityBuffer=buffer(city.length*4,GPUBufferUsage.VERTEX);
  device.queue.writeBuffer(cityBuffer,0,new Float32Array(city));
  const dynamic=buffer(65536,GPUBufferUsage.VERTEX), camera=buffer(64,GPUBufferUsage.UNIFORM);
@@ -240,29 +340,13 @@ async function boot(){
  device.lost.then(()=>{lost=true;showMenu('Graphics device disconnected.','Reload this page to reconnect WebGPU.','Reload');start.onclick=()=>location.reload();});
  function frame(now){
   if(lost)return;
-  const dt=Math.min(.055,(now-last)/1000);last=now;
-  if(playing){const steps=Math.max(1,Math.ceil(dt/.012));for(let i=0;i<steps&&playing;i++)step(dt/steps);}
-  const resolution=Math.min(1,1400/innerWidth);
-  const width=Math.max(1,Math.round(innerWidth*resolution)),height=Math.max(1,Math.round(innerHeight*resolution));
+  const scene=updateScene(now,last);last=now;
+  const {width,height,eye,right,up,front:forward,mesh}=scene;
   if(!depth||canvas.width!==width||canvas.height!==height){
    canvas.width=width;canvas.height=height;depth?.destroy();
    depth=device.createTexture({size:[width,height],format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});
   }
-  const dir=[Math.sin(yaw),0,-Math.cos(yaw)];
-  const eye=add(sub(player,scale(dir,8.8)),[0,3.3,0]);
-  const forward=unit(add(dir,[0,-.15,0])),right=unit(cross(forward,[0,1,0])),up=cross(right,forward);
   device.queue.writeBuffer(camera,0,new Float32Array([...eye,width,...right,1.65*height/width,...up,height,...forward,0]));
-  const mesh=[];
-  actor(mesh);
-  if(signal<targets.length){
-   const target=targets[signal], spin=now*.001;
-   for(let i=0;i<18;i++){
-    const theta=i*Math.PI/9, next=(i+1)*Math.PI/9;
-    const point=angle=>add(target,[Math.cos(angle)*7,Math.sin(angle)*7,Math.sin(spin)*.55*Math.cos(angle)]);
-    beam(mesh,point(theta),point(next),.23,[.96,.54,.22,3]);
-   }
-   if(playing) hud.textContent=`SIGNALS ${signal}/6  ·  ${timer.toFixed(1)}s  ·  ${Math.round(length(velocity)*3.6)} km/h  ·  TARGET ${Math.round(length(sub(player,target)))} m${anchor?'  ·  ATTACHED':''}`;
-  }
   device.queue.writeBuffer(dynamic,0,new Float32Array(mesh));
   const enc=device.createCommandEncoder();
   const pass=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:[.15,.18,.25,1]}],
@@ -276,6 +360,9 @@ async function boot(){
  status.textContent='WASD to steer · Hold Space or click to swing';
  start.disabled=false;
 }
-boot().catch(error=>{console.error(error);status.textContent=error.message;});
+boot().catch(error=>{
+ console.warn(error.message);
+ try{bootFallback();}catch(fallbackError){console.error(fallbackError);status.textContent=fallbackError.message;}
+});
 </script>
 </html>
