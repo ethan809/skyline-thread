@@ -43,14 +43,14 @@ fn sky(ray:vec3f)->vec3f {
  let uv=vec2f(p.x/view.eye.w*2.-1.,1.-p.y/view.up.w*2.);
  return vec4f(sky(normalize(view.front.xyz+view.right.xyz*uv.x/view.right.w+view.up.xyz*uv.y/1.65)),1.);
 }
-@fragment fn fragment(in:Vertex)->@location(0) vec4f {
- let p=in.world; let n=normalize(in.normal); let ray=normalize(p-view.eye.xyz);
+@fragment fn fragment(input:Vertex)->@location(0) vec4f {
+ let p=input.world; let n=normalize(input.normal); let ray=normalize(p-view.eye.xyz);
  let sun=normalize(vec3f(-.34,.36,-1.));
- var base=in.material.rgb;
+ var base=input.material.rgb;
  var glow=vec3f(0.);
  let horizontal=abs(n.y)>.5;
  let grain=hash(floor(p.xz*12.+p.y*9.));
- if(in.material.w==1. && !horizontal){
+ if(input.material.w==1. && !horizontal){
    let along=select(p.x,p.z,abs(n.x)>.5);
    let grid=vec2f(along/2.4,p.y/3.6);
    let window=fract(grid);
@@ -62,12 +62,12 @@ fn sky(ray:vec3f)->vec3f {
      if(abs(window.x-.5)<.025 || abs(window.y-.63)<.025){base*=.45;glow*=.35;}
    }
  }
- if(in.material.w==2. && horizontal){
+ if(input.material.w==2. && horizontal){
    let cross=min(abs(fract(p.x/56.+.5)-.5),abs(fract(p.z/56.+.5)-.5))*56.;
    if(cross<.09 && fract((p.x+p.z)/6.)<.55){base=vec3f(.48,.41,.22);}
    base+=sky(reflect(ray,n))*.32*pow(1.-abs(ray.y),3.)*(.45+grain*.55);
  }
- if(in.material.w==3.){glow=base*1.25;}
+ if(input.material.w==3.){glow=base*1.25;}
  let light=.48+.82*max(0.,dot(n,sun));
  let haze=1.-exp(-length(p-view.eye.xyz)*.0022);
  return vec4f(mix(base*light*(.92+.15*grain)+glow,sky(ray),haze*.83),1.);
@@ -265,7 +265,7 @@ function bootCanvas(){
    const shade=mat[3]===3?1.65:.61+.75*Math.max(0,dot(normal,light));
    const fog=clamp(depth/680,0,.75);
    const rgb=mat.slice(0,3).map((v,i)=>Math.round(255*clamp(v*shade*(1-fog)+[.49,.37,.42][i]*fog,0,1)));
-   polygons.push({points,depth,color:`rgb(${rgb.join(' ' )})`});
+   polygons.push({points,depth:mat[3]===2?Infinity:depth,color:`rgb(${rgb.join(' ' )})`});
   }
   for(const surface of surfaces)gather(surface,false);
   for(let i=0;i<mesh.length;i+=60){
