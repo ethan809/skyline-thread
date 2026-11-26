@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Skyline Thread</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#181927;color:#fff;font:16px system-ui;overflow:hidden}canvas{width:100vw;height:100dvh;display:block}button{font:inherit;font-weight:750;cursor:pointer;border:0;background:#ffbc82;color:#211817;padding:.8rem 1.2rem;border-radius:5px}button:disabled{opacity:.55;cursor:wait}#menu{position:absolute;inset:0;display:grid;align-items:center;padding:clamp(24px,8vw,120px);background:linear-gradient(90deg,#110e1aed,transparent)}#menu[hidden],#hud[hidden]{display:none}h1{font-size:clamp(54px,10vw,136px);line-height:.84;margin:18px 0 25px;letter-spacing:-.085em}h1 span{color:#ffbc82}.eyebrow{font:700 13px monospace;letter-spacing:.23em;color:#ffbc82}p{max-width:370px;line-height:1.55}#status{min-height:48px;color:#e8d6d3}#hud{position:absolute;top:20px;left:20px;background:#171421e0;padding:13px 16px;border-left:3px solid #ffbc82;font:700 14px monospace}#hint{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);text-align:center;background:#171421df;padding:10px 14px;border-radius:5px;font-size:13px;width:max-content;max-width:94vw}#hint[hidden]{display:none}#touch{display:none}@media(pointer:coarse){body.playing #touch{position:absolute;bottom:65px;inset-inline:12px;display:flex;justify-content:space-between;touch-action:none}#touch button{padding:12px;margin:3px}}canvas{touch-action:none}
+</style>
+<canvas aria-label="3D city"></canvas><div id="hud" hidden></div><div id="hint" hidden>WASD to steer · Hold Space or mouse to swing · Shift to dive · R to restart</div>
+<section id="menu"><div><div class="eyebrow">WEBGPU · ROOFTOP TIME TRIAL</div><h1>Skyline<br><span>Thread</span></h1><p id="intro">Swing through the city at dusk. Collect six rooftop signals and beat your fastest time.</p><button id="start" disabled>Start swinging</button><p id="status" role="status">Starting WebGPU…</p></div></section>
+<div id="touch"><div><button data-key="KeyA" aria-label="Turn left">◀</button><button data-key="KeyD" aria-label="Turn right">▶</button></div><div><button data-key="Space">Swing</button><button data-key="KeyW">Boost</button></div></div>
+<script type="module">
+const canvas=document.querySelector('canvas'), menu=document.querySelector('#menu');
+const start=document.querySelector('#start'), status=document.querySelector('#status');
+const hud=document.querySelector('#hud'), hint=document.querySelector('#hint');
+const shader=`
+struct View { eye:vec4f, right:vec4f, up:vec4f, front:vec4f };
+@group(0) @binding(0) var<uniform> view:View;
+struct Vertex {
+ @builtin(position) clip:vec4f, @location(0) world:vec3f,
+ @location(1) normal:vec3f, @location(2) material:vec4f
+};
+@vertex fn vertex(@location(0) pos:vec3f,@location(1) normal:vec3f,@location(2) material:vec4f)->Vertex {
+ var out:Vertex;
+ let d=pos-view.eye.xyz;
+ let z=dot(d,view.front.xyz);
+ out.clip=vec4f(dot(d,view.right.xyz)*view.right.w,dot(d,view.up.xyz)*1.65,z*1.0001-.12,z);
+ out.world=pos; out.normal=normal; out.material=material;
+ return out;
+}
+fn hash(p:vec2f)->f32 { return fract(sin(dot(p,vec2f(127.1,311.7)))*43758.5453); }
+fn sky(ray:vec3f)->vec3f {
+ let sun=normalize(vec3f(-.34,.19,-1.));
+ let angle=max(0.,dot(ray,sun));
+ let horizon=exp(-abs(ray.y)*5.);
+ let cloud=smoothstep(.49,.74,sin(ray.x*19.+sin(ray.z*12.))*sin(ray.y*34.+ray.z*9.)*.5+.5);
+ return mix(vec3f(.13,.21,.37),vec3f(.68,.43,.34),horizon)
+       +vec3f(.85,.38,.15)*pow(angle,22.)+vec3f(1.,.68,.31)*pow(angle,850.)*2.
+       +cloud*max(0.,ray.y)*vec3f(.25,.16,.19);
+}
+@vertex fn background(@builtin(vertex_index) index:u32)->@builtin(position) vec4f {
+ let corners=array<vec2f,3>(vec2f(-1.,-1.),vec2f(3.,-1.),vec2f(-1.,3.));
+ return vec4f(corners[index],1.,1.);
+}
+@fragment fn atmosphere(@builtin(position) p:vec4f)->@location(0) vec4f {
+ let uv=vec2f(p.x/view.eye.w*2.-1.,1.-p.y/view.up.w*2.);
+ return vec4f(sky(normalize(view.front.xyz+view.right.xyz*uv.x/view.right.w+view.up.xyz*uv.y/1.65)),1.);
+}
+@fragment fn fragment(in:Vertex)->@location(0) vec4f {
+ let p=in.world; let n=normalize(in.normal); let ray=normalize(p-view.eye.xyz);
+ let sun=normalize(vec3f(-.34,.36,-1.));
+ var base=in.material.rgb;
+ var glow=vec3f(0.);
+ let horizontal=abs(n.y)>.5;
+ let grain=hash(floor(p.xz*12.+p.y*9.));
+ if(in.material.w==1. && !horizontal){
+   let along=select(p.x,p.z,abs(n.x)>.5);
+   let grid=vec2f(along/2.4,p.y/3.6);
+   let window=fract(grid);
+   let lit=hash(floor(grid)+vec2f(floor(p.x+p.z),0.));
+   if(window.x>.13 && window.x<.87 && window.y>.18 && window.y<.88){
+     let reflected=sky(reflect(ray,n));
+     base=base*.25+reflected*.32;
+     if(lit>.64){ glow=vec3f(.72,.39,.15)*lit*(.6+.4*step(.31,window.y)); }
+     if(abs(window.x-.5)<.025 || abs(window.y-.63)<.025){base*=.45;glow*=.35;}
+   }
+ }
+ if(in.material.w==2. && horizontal){
+   let cross=min(abs(fract(p.x/56.+.5)-.5),abs(fract(p.z/56.+.5)-.5))*56.;
+   if(cross<.09 && fract((p.x+p.z)/6.)<.55){base=vec3f(.48,.41,.22);}
+   base+=sky(reflect(ray,n))*.32*pow(1.-abs(ray.y),3.)*(.45+grain*.55);
+ }
+ if(in.material.w==3.){glow=base*1.25;}
+ let light=.48+.82*max(0.,dot(n,sun));
+ let haze=1.-exp(-length(p-view.eye.xyz)*.0022);
+ return vec4f(mix(base*light*(.92+.15*grain)+glow,sky(ray),haze*.83),1.);
+}`;
+const add=(a,b)=>a.map((x,i)=>x+b[i]), sub=(a,b)=>a.map((x,i)=>x-b[i]);
+const scale=(a,s)=>a.map(x=>x*s), dot=(a,b)=>a.reduce((sum,x,i)=>sum+x*b[i],0);
+const length=a=>Math.hypot(...a), unit=a=>scale(a,1/(length(a)||1));
+const cross=([x,y,z],[a,b,c])=>[y*c-z*b,z*a-x*c,x*b-y*a];
+const clamp=(v,min,max)=>Math.min(max,Math.max(min,v));
+const faces=[[1,0,0,1,5,7,3],[-1,0,0,4,0,2,6],[0,1,0,2,3,7,6],[0,-1,0,4,5,1,0],[0,0,1,5,4,6,7],[0,0,-1,0,1,3,2]];
+function box(mesh,center,size,color,basis=[[1,0,0],[0,1,0],[0,0,1]]){
+ const vertices=Array.from({length:8},(_,i)=>basis.reduce((p,axis,j)=>add(p,scale(axis,size[j]*((i>>j&1)-.5))),center));
+ for(const [x,y,z,a,b,c,d] of faces){
+  const n=add(add(scale(basis[0],x),scale(basis[1],y)),scale(basis[2],z));
+  for(const index of [a,b,c,a,c,d]) mesh.push(...vertices[index],...n,...color);
+ }
+}
+function beam(mesh,a,b,width,color){
+ const up=unit(sub(b,a)), side=unit(cross(up,Math.abs(up[1])>.9?[0,0,1]:[0,1,0]));
+ box(mesh,scale(add(a,b),.5),[width,length(sub(b,a)),width],color,[side,up,cross(side,up)]);
+}
+let seed=2013;
+function random(){seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;}
+const city=[], buildings=[];
+box(city,[0,-.6,0],[1040,1,1040],[.095,.088,.104,2]);
+for(let i=-8;i<=8;i++)for(let j=-8;j<=8;j++){
+ const x=i*56+28,z=j*56+28;
+ const height=26+random()*78+(random()>.86?36:0), w=26+random()*13,d=27+random()*12;
+ const tone=.12+random()*.16, color=[tone,tone*.94,tone*1.06,1];
+ buildings.push({x,z,h:height,w,d});
+ box(city,[x,.1,z],[46,.35,46],[.22,.21,.22,0]);
+ box(city,[x,height/2,z],[w,height,d],color);
+ box(city,[x,height+.35,z],[w+.5,.7,d+.5],[tone*.8,tone*.82,tone,0]);
+ box(city,[x+w*.17,height+1.6,z+d*.17],[w*.27,2.8,d*.29],color);
+ if(random()>.52)box(city,[x,height+3,z],[.37,6,.37],[.27,.24,.28,0]);
+ for(const edge of [-1,1]){
+  box(city,[x+edge*23,3,z-21],[.22,6,.22],[.21,.21,.23,0]);
+  box(city,[x+edge*23,6,z-21],[.55,.18,.55],[.9,.63,.36,3]);
+ }
+}
+const targets=[[0,55,-53],[-5,53,-116],[3,52,-182],[0,53,-241],[7,57,-304],[0,56,-379]];
+const keys=new Set();
+let player,velocity,anchor,rope,yaw,timer,signal,playing=false,jumpReady=true,mouse=false;
+function reset(){
+ player=[0,64,12]; velocity=[0,1,-24]; anchor=null; yaw=0; timer=0; signal=0; jumpReady=true;
+}
+reset();
+function step(dt){
+ timer+=dt;
+ yaw+=((keys.has('KeyD')?1:0)-(keys.has('KeyA')?1:0))*dt*1.6;
+ const front=[Math.sin(yaw),0,-Math.cos(yaw)];
+ const swing=keys.has('Space')||mouse;
+ if(swing&&!anchor&&jumpReady){
+  let best=Infinity;
+  for(const b of buildings){
+   const x=b.x-Math.sign(b.x-player[0])*b.w*.5;
+   const z=b.z-Math.sign(b.z-player[2])*b.d*.5;
+   const point=[x, b.h+1, z], diff=sub(point,player), dist=length(diff);
+   if(diff[1]<5||dist>96||dot(front,diff)<9||dist>=best)continue;
+   best=dist; anchor=point;
+  }
+  if(anchor){rope=best*.9;jumpReady=false;}
+  else if(player[1]<4){velocity[1]=29;jumpReady=false;}
+ }
+ if(!swing){anchor=null;jumpReady=true;}
+ const thrust=keys.has('KeyW')?33:keys.has('KeyS')?-18:14;
+ velocity=add(scale(velocity,Math.exp(-dt*.38)),scale(add(scale(front,thrust),[0,keys.has('ShiftLeft')?-44:-19,0]),dt));
+ if(anchor) velocity=add(velocity,scale(unit(sub(anchor,player)),dt*10));
+ const speed=length(velocity);
+ if(speed>58)velocity=scale(velocity,58/speed);
+ const old=player;
+ player=add(player,scale(velocity,dt));
+ if(anchor){
+  const delta=sub(player,anchor),dist=length(delta);
+  if(dist>rope){
+   const outward=unit(delta);
+   player=add(anchor,scale(outward,rope));
+   velocity=sub(velocity,scale(outward,Math.max(0,dot(velocity,outward))));
+  }
+ }
+ for(const b of buildings){
+  if(Math.abs(player[0]-b.x)>b.w/2+.45||Math.abs(player[2]-b.z)>b.d/2+.45||player[1]>b.h+1.3)continue;
+  if(old[1]>=b.h+1.3){player[1]=b.h+1.3;velocity[1]=Math.max(0,velocity[1]);}
+  else{
+   const px=b.w/2+.46-Math.abs(player[0]-b.x), pz=b.d/2+.46-Math.abs(player[2]-b.z);
+   const axis=px<pz?0:2, center=axis===0?b.x:b.z;
+   player[axis]+=(Math.sign(old[axis]-center)||1)*(axis===0?px:pz);
+   velocity[axis]=0;
+  }
+ }
+ if(player[1]<1.2){player[1]=1.2;velocity[1]=Math.max(0,velocity[1]);}
+ if(Math.abs(player[0])>490||Math.abs(player[2])>490){player=[0,64,12];velocity=[0,0,-24];anchor=null;yaw=0;}
+ if(length(sub(player,targets[signal]))<12){
+  signal++;
+  if(signal===targets.length){
+   let best=timer;
+   try{best=Math.min(timer,Number(localStorage.threadBest)||Infinity);localStorage.threadBest=best;}catch{}
+   showMenu('Run complete',`Time ${timer.toFixed(1)}s · Best ${best.toFixed(1)}s`,'Swing again');
+  }
+ }
+}
+function showMenu(title,message,button){
+ playing=false;keys.clear();mouse=false;menu.hidden=false;hud.hidden=true;hint.hidden=true;
+ document.body.classList.remove('playing');
+ document.querySelector('#intro').textContent=title;status.textContent=message;start.textContent=button;
+}
+start.onclick=()=>{reset();playing=true;menu.hidden=true;hud.hidden=false;hint.hidden=false;document.body.classList.add('playing');};
+const accepted=['KeyW','KeyA','KeyS','KeyD','Space','ShiftLeft','KeyR','Escape'];
+addEventListener('keydown',e=>{
+ if(!playing||!accepted.includes(e.code))return;
+ e.preventDefault();keys.add(e.code);
+ if(e.code==='KeyR')reset();
+ if(e.code==='Escape')showMenu('Swing through the city at dusk.','Collect six rooftop signals.','Restart run');
+});
+addEventListener('keyup',e=>keys.delete(e.code));
+canvas.onpointerdown=()=>{if(playing)mouse=true;};
+addEventListener('pointerup',()=>mouse=false);
+addEventListener('pointercancel',()=>mouse=false);
+addEventListener('blur',()=>{keys.clear();mouse=false;});
+for(const button of document.querySelectorAll('[data-key]')){
+ const code=button.dataset.key;
+ button.onpointerdown=e=>{e.preventDefault();button.setPointerCapture(e.pointerId);keys.add(code);};
+ button.onlostpointercapture=()=>keys.delete(code);
+}
+function actor(mesh){
+ const p=player, side=[Math.cos(yaw),0,Math.sin(yaw)], f=[Math.sin(yaw),0,-Math.cos(yaw)];
+ const at=(x,y,z)=>add(p,add(add(scale(side,x),[0,y,0]),scale(f,z)));
+ const suit=[.075,.085,.12,0], armor=[.15,.19,.20,0], gold=[.9,.47,.16,0];
+ const basis=[side,[0,1,0],scale(f,-1)];
+ box(mesh,at(0,.12,0),[.72,.79,.39],armor,basis);
+ box(mesh,at(0,.68,.025),[.38,.43,.38],suit,basis);
+ box(mesh,at(0,.72,.207),[.31,.075,.028],[.86,.56,.22,3],basis);
+ beam(mesh,at(-.31,.4,-.205),at(.29,-.23,-.205),.10,gold);
+ for(const s of [-1,1]){
+  const hip=at(.19*s,-.12,0), knee=at(.28*s,-.61,.22), boot=at(.26*s,-1.02,-.07);
+  beam(mesh,hip,knee,.23,suit);beam(mesh,knee,boot,.17,armor);
+  const shoulder=at(.39*s,.36,0), elbow=at(.61*s,.09,.15), hand=anchor&&s===1?at(.45,.71,.40):at(.68*s,.22,.42);
+  beam(mesh,shoulder,elbow,.17,armor);beam(mesh,elbow,hand,.14,gold);
+  if(anchor&&s===1)beam(mesh,hand,anchor,.037,[.88,.79,.69,3]);
+ }
+}
+async function boot(){
+ if(!navigator.gpu)throw Error('WebGPU is unavailable. Open this in a browser with WebGPU enabled.');
+ const adapter=await navigator.gpu.requestAdapter();
+ if(!adapter)throw Error('This browser could not find a WebGPU graphics adapter.');
+ const device=await adapter.requestDevice(), ctx=canvas.getContext('webgpu');
+ const format=navigator.gpu.getPreferredCanvasFormat();
+ ctx.configure({device,format,alphaMode:'opaque'});
+ const module=device.createShaderModule({code:shader});
+ const errors=(await module.getCompilationInfo()).messages.filter(msg=>msg.type==='error');
+ if(errors.length)throw Error(errors.map(msg=>msg.message).join(' | '));
+ const layout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}}]});
+ const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
+ const world=await device.createRenderPipelineAsync({
+  layout:pipelineLayout, vertex:{module,entryPoint:'vertex',buffers:[{arrayStride:40,attributes:[
+   {shaderLocation:0,offset:0,format:'float32x3'},{shaderLocation:1,offset:12,format:'float32x3'},{shaderLocation:2,offset:24,format:'float32x4'}
+  ]}]},fragment:{module,entryPoint:'fragment',targets:[{format}]},
+  depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less'}
+ });
+ const background=await device.createRenderPipelineAsync({
+  layout:pipelineLayout,vertex:{module,entryPoint:'background'},fragment:{module,entryPoint:'atmosphere',targets:[{format}]},
+  depthStencil:{format:'depth24plus',depthWriteEnabled:false,depthCompare:'always'}
+ });
+ function buffer(size,usage){return device.createBuffer({size,usage:usage|GPUBufferUsage.COPY_DST});}
+ const cityBuffer=buffer(city.length*4,GPUBufferUsage.VERTEX);
+ device.queue.writeBuffer(cityBuffer,0,new Float32Array(city));
+ const dynamic=buffer(65536,GPUBufferUsage.VERTEX), camera=buffer(64,GPUBufferUsage.UNIFORM);
+ const bind=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:camera}}]});
+ let depth, last=performance.now(), lost=false;
+ device.lost.then(()=>{lost=true;showMenu('Graphics device disconnected.','Reload this page to reconnect WebGPU.','Reload');start.onclick=()=>location.reload();});
+ function frame(now){
+  if(lost)return;
+  const dt=Math.min(.055,(now-last)/1000);last=now;
+  if(playing){const steps=Math.max(1,Math.ceil(dt/.012));for(let i=0;i<steps&&playing;i++)step(dt/steps);}
+  const resolution=Math.min(1,1400/innerWidth);
+  const width=Math.max(1,Math.round(innerWidth*resolution)),height=Math.max(1,Math.round(innerHeight*resolution));
+  if(!depth||canvas.width!==width||canvas.height!==height){
+   canvas.width=width;canvas.height=height;depth?.destroy();
+   depth=device.createTexture({size:[width,height],format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});
+  }
+  const dir=[Math.sin(yaw),0,-Math.cos(yaw)];
+  const eye=add(sub(player,scale(dir,8.8)),[0,3.3,0]);
+  const forward=unit(add(dir,[0,-.15,0])),right=unit(cross(forward,[0,1,0])),up=cross(right,forward);
+  device.queue.writeBuffer(camera,0,new Float32Array([...eye,width,...right,1.65*height/width,...up,height,...forward,0]));
+  const mesh=[];
+  actor(mesh);
+  if(signal<targets.length){
+   const target=targets[signal], spin=now*.001;
+   for(let i=0;i<18;i++){
+    const theta=i*Math.PI/9, next=(i+1)*Math.PI/9;
+    const point=angle=>add(target,[Math.cos(angle)*7,Math.sin(angle)*7,Math.sin(spin)*.55*Math.cos(angle)]);
+    beam(mesh,point(theta),point(next),.23,[.96,.54,.22,3]);
+   }
+   if(playing) hud.textContent=`SIGNALS ${signal}/6  ·  ${timer.toFixed(1)}s  ·  ${Math.round(length(velocity)*3.6)} km/h  ·  TARGET ${Math.round(length(sub(player,target)))} m${anchor?'  ·  ATTACHED':''}`;
+  }
+  device.queue.writeBuffer(dynamic,0,new Float32Array(mesh));
+  const enc=device.createCommandEncoder();
+  const pass=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:[.15,.18,.25,1]}],
+   depthStencilAttachment:{view:depth.createView(),depthLoadOp:'clear',depthStoreOp:'discard',depthClearValue:1}});
+  pass.setPipeline(background);pass.setBindGroup(0,bind);pass.draw(3);
+  pass.setPipeline(world);pass.setBindGroup(0,bind);pass.setVertexBuffer(0,cityBuffer);pass.draw(city.length/10);
+  pass.setVertexBuffer(0,dynamic);pass.draw(mesh.length/10);pass.end();device.queue.submit([enc.finish()]);
+  requestAnimationFrame(frame);
+ }
+ requestAnimationFrame(frame);
+ status.textContent='WASD to steer · Hold Space or click to swing';
+ start.disabled=false;
+}
+boot().catch(error=>{console.error(error);status.textContent=error.message;});
+</script>
+</html>
