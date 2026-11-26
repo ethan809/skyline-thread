@@ -230,6 +230,59 @@ function updateScene(now,last){
   }
   return {width,height,eye,right,up,front:forward,mesh};
 }
+function bootCanvas(){
+ const ctx=canvas.getContext('2d');
+ if(!ctx)throw Error('This browser could not create a graphics canvas.');
+ const surfaces=[];
+ for(let i=0;i<city.length;i+=60){
+  const quad=[0,10,20,50].map(offset=>city.slice(i+offset,i+offset+3));
+  if(quad.length===4&&quad[3].length===3)surfaces.push({quad,normal:city.slice(i+3,i+6),mat:city.slice(i+6,i+10)});
+ }
+ const light=unit([-.34,.36,-1]);
+ let last=performance.now();
+ function frame(now){
+  const {width,height,eye,right,up,front,mesh}=updateScene(now,last);last=now;
+  if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;}
+  const sky=ctx.createLinearGradient(0,0,0,height);
+  sky.addColorStop(0,'#293952');sky.addColorStop(.53,'#b27f77');sky.addColorStop(1,'#3d3543');
+  ctx.fillStyle=sky;ctx.fillRect(0,0,width,height);
+  const focal=height*.825, near=.35;
+  const camera=p=>{const d=sub(p,eye);return [dot(d,right),dot(d,up),dot(d,front)];};
+  const polygons=[];
+  function gather({quad,normal,mat},dynamic){
+   const middle=scale(add(quad[0],quad[2]),.5);
+   if(!dynamic&&dot(sub(eye,middle),normal)<=0)return;
+   const local=quad.map(camera), clipped=[];
+   for(let i=0;i<4;i++){
+    const a=local[i],b=local[(i+1)%4];
+    if(a[2]>=near)clipped.push(a);
+    if((a[2]>=near)!==(b[2]>=near))clipped.push(add(a,scale(sub(b,a),(near-a[2])/(b[2]-a[2]))));
+   }
+   if(clipped.length<3)return;
+   const points=clipped.map(([x,y,z])=>[width/2+x*focal/z,height/2-y*focal/z]);
+   if(points.every(p=>p[0]<0)||points.every(p=>p[0]>width)||points.every(p=>p[1]<0)||points.every(p=>p[1]>height))return;
+   const depth=dot(sub(middle,eye),front);
+   const shade=mat[3]===3?1.65:.61+.75*Math.max(0,dot(normal,light));
+   const fog=clamp(depth/680,0,.75);
+   const rgb=mat.slice(0,3).map((v,i)=>Math.round(255*clamp(v*shade*(1-fog)+[.49,.37,.42][i]*fog,0,1)));
+   polygons.push({points,depth,color:`rgb(${rgb.join(' ' )})`});
+  }
+  for(const surface of surfaces)gather(surface,false);
+  for(let i=0;i<mesh.length;i+=60){
+   gather({quad:[0,10,20,50].map(offset=>mesh.slice(i+offset,i+offset+3)),normal:mesh.slice(i+3,i+6),mat:mesh.slice(i+6,i+10)},true);
+  }
+  polygons.sort((a,b)=>b.depth-a.depth);
+  for(const poly of polygons){
+   ctx.beginPath();ctx.moveTo(...poly.points[0]);
+   for(const point of poly.points.slice(1))ctx.lineTo(...point);
+   ctx.closePath();ctx.fillStyle=poly.color;ctx.fill();
+  }
+  requestAnimationFrame(frame);
+ }
+ requestAnimationFrame(frame);
+ status.textContent='Low graphics mode · WASD to steer · Hold Space or click to swing';
+ start.disabled=false;
+}
 function bootFallback(){
  const gl=canvas.getContext('webgl2');
  if(!gl)throw Error('This device could not start WebGPU or WebGL 2.');
@@ -362,7 +415,10 @@ async function boot(){
 }
 boot().catch(error=>{
  console.warn(error.message);
- try{bootFallback();}catch(fallbackError){console.error(fallbackError);status.textContent=fallbackError.message;}
+ try{bootFallback();}catch(fallbackError){
+  console.warn(fallbackError.message);
+  try{bootCanvas();}catch(canvasError){status.textContent=canvasError.message;}
+ }
 });
 </script>
 </html>
